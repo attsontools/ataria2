@@ -1,0 +1,41 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Aria2 下载",
+  "version": "0.1.0-alpha.0",
+  "identifier": "com.attson.aria2",
+  "build": {
+    "beforeDevCommand": "pnpm stage:service && pnpm dev",
+    "devUrl": "http://127.0.0.1:1427",
+    "beforeBuildCommand": "pnpm build && pnpm stage:service --release",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Aria2 下载",
+        "width": 1180,
+        "height": 760,
+        "minWidth": 780,
+        "minHeight": 580,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg", "deb", "nsis"],
+    "externalBin": ["binaries/ataria2-service", "binaries/aria2c"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  },
+  "plugins": {}
+}
