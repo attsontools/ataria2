@@ -2,6 +2,7 @@
 /src-tauri/target/
 /src-tauri/binaries/ataria2-service-*
 /src-tauri/binaries/aria2c-*
+/src-tauri/binaries/licenses/
 /src-tauri/gen/
 /node_modules/
 /dist/

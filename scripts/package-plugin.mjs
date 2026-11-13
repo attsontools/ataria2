@@ -8,6 +8,8 @@ import { pathToFileURL } from 'node:url';
 import { parseManifest } from '@attson/plugin-sdk';
 import { signManifest, verifyManifestSignature } from '@attson/plugin-sdk/node';
 
+import { downloadVerified } from './runtime-download.mjs';
+
 const TARGETS = {
   'aarch64-apple-darwin': ['macos', 'aarch64', 'ataria2-service', 'aria2c'],
   'x86_64-apple-darwin': ['macos', 'x86_64', 'ataria2-service', 'aria2c'],
@@ -28,7 +30,21 @@ export function resolveReleaseTarget(targetTriple) {
   };
 }
 
+export function requiredPayloadPaths(target) {
+  return [
+    'LICENSE',
+    'licenses/aria2-COPYING',
+    ...(target.targetOs === 'windows' ? ['licenses/aria2-LICENSE.OpenSSL'] : []),
+    `native/${target.runtimeFileName}`,
+    `native/${target.serviceFileName}`,
+    'ui/index.html'
+  ].sort();
+}
+
 export function createPluginManifest({ version, target, publisherKeyId, files }) {
+  for (const relative of requiredPayloadPaths(target)) {
+    if (!files[relative]) throw new Error(`Plugin payload is missing ${relative}`);
+  }
   const serviceEntry = `native/${target.serviceFileName}`;
   return parseManifest({
     schemaVersion: 1,
@@ -50,7 +66,45 @@ export function createPluginManifest({ version, target, publisherKeyId, files })
   });
 }
 
+export function loadPublisherSigningConfig(env) {
+  const keyId = env.ATARIA2_PUBLISHER_KEY_ID?.trim();
+  if (!keyId) throw new Error('ATARIA2_PUBLISHER_KEY_ID is required');
+  const encodedKey = env.ATARIA2_PUBLISHER_PRIVATE_KEY?.trim();
+  if (!encodedKey) throw new Error('ATARIA2_PUBLISHER_PRIVATE_KEY is required');
+  const encodedPublicKey = env.ATARIA2_PUBLISHER_PUBLIC_KEY?.trim();
+  if (!encodedPublicKey) throw new Error('ATARIA2_PUBLISHER_PUBLIC_KEY is required');
+  if (!/^[A-Za-z0-9+/]{43}=$/.test(encodedPublicKey)) {
+    throw new Error('ATARIA2_PUBLISHER_PUBLIC_KEY must be a raw Ed25519 public key');
+  }
+  let privateKey;
+  try {
+    privateKey = createPrivateKey(encodedKey);
+  } catch {
+    throw new Error('ATARIA2_PUBLISHER_PRIVATE_KEY must be an Ed25519 private key');
+  }
+  if (privateKey.asymmetricKeyType !== 'ed25519') {
+    throw new Error('ATARIA2_PUBLISHER_PRIVATE_KEY must be an Ed25519 private key');
+  }
+  const publicKey = createPublicKey(privateKey);
+  const derived = publicKey.export({ format: 'jwk' });
+  const derivedRaw = Buffer.from(derived.x, 'base64url').toString('base64');
+  if (derivedRaw !== encodedPublicKey) {
+    throw new Error('Publisher private key does not match configured public key');
+  }
+  return { keyId, privateKey, publicKey, testKey: false };
+}
+
 export async function buildTestPackage({ root, version, targetTriple, runtimePath }) {
+  return buildPluginPackage({
+    root,
+    version,
+    targetTriple,
+    runtimePath,
+    signing: localTestSigningKey()
+  });
+}
+
+export async function buildPluginPackage({ root, version, targetTriple, runtimePath, signing }) {
   const target = resolveReleaseTarget(targetTriple);
   const runtime = JSON.parse(await readFile(path.join(root, 'runtime-manifest.json'), 'utf8')).aria2;
   verifyRuntime(runtimePath, runtime.version);
@@ -60,8 +114,6 @@ export async function buildTestPackage({ root, version, targetTriple, runtimePat
     artifacts,
     `AT.Aria2_${version}_${target.targetOs}_${target.targetArch}.atpkg`
   );
-  const { privateKey, publicKey } = localTestSigningKey();
-  const keyId = 'attool-p0-test';
   try {
     run('cargo', ['build', '--release', '--bin', 'ataria2-service', '--target', targetTriple], root);
     await mkdir(path.join(stage, 'ui'), { recursive: true });
@@ -75,22 +127,35 @@ export async function buildTestPackage({ root, version, targetTriple, runtimePat
       path.join(stage, 'native', target.serviceFileName)
     );
     await cp(runtimePath, path.join(stage, 'native', target.runtimeFileName));
-    await stageAria2License(root, stage);
+    await stageAria2Licenses(root, stage, target, runtimePath, signing.testKey);
 
     const files = {};
     for (const relative of await collect(stage)) {
       files[relative] = sha256(await readFile(path.join(stage, relative)));
     }
-    const manifest = createPluginManifest({ version, target, publisherKeyId: keyId, files });
-    const signature = signManifest(manifest, privateKey);
-    if (!verifyManifestSignature(manifest, signature, publicKey)) {
+    const manifest = createPluginManifest({
+      version,
+      target,
+      publisherKeyId: signing.keyId,
+      files
+    });
+    const signature = signManifest(manifest, signing.privateKey);
+    if (!verifyManifestSignature(manifest, signature, signing.publicKey)) {
       throw new Error('local test signature verification failed');
     }
     await writeFile(path.join(stage, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
     await writeFile(path.join(stage, 'manifest.sig'), `${signature}\n`);
     await rm(output, { force: true });
-    run('zip', ['-X', '-D', '-q', output, ...await collect(stage)], stage);
+    await archive(stage, output);
+    await verifyPluginPackage(output, signing.publicKey, {
+      version,
+      publisherKeyId: signing.keyId,
+      target
+    });
     return { output, manifest };
+  } catch (error) {
+    await rm(output, { force: true });
+    throw error;
   } finally {
     await rm(stage, { recursive: true, force: true });
   }
@@ -111,7 +176,21 @@ function verifyRuntime(runtimePath, expectedVersion) {
   assertAria2Version(result.stdout, expectedVersion);
 }
 
-async function stageAria2License(root, stage) {
+async function stageAria2Licenses(root, stage, target, runtimePath, testKey) {
+  if (!testKey) {
+    const runtimeDirectory = path.dirname(runtimePath);
+    await cp(
+      path.join(runtimeDirectory, 'aria2-COPYING'),
+      path.join(stage, 'licenses', 'aria2-COPYING')
+    );
+    if (target.targetOs === 'windows') {
+      await cp(
+        path.join(runtimeDirectory, 'aria2-LICENSE.OpenSSL'),
+        path.join(stage, 'licenses', 'aria2-LICENSE.OpenSSL')
+      );
+    }
+    return;
+  }
   const runtime = JSON.parse(await readFile(path.join(root, 'runtime-manifest.json'), 'utf8')).aria2;
   const name = `aria2-${runtime.version}.tar.gz`;
   const origin = `https://github.com/aria2/aria2/releases/download/release-${runtime.version}/${name}`;
@@ -130,21 +209,50 @@ async function stageAria2License(root, stage) {
   }
 }
 
-async function downloadVerified(origin, expectedSha256) {
-  let lastError;
-  for (const url of [origin, `https://gh-proxy.com/${origin}`]) {
-    try {
-      const response = await fetch(url);
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const bytes = Buffer.from(await response.arrayBuffer());
-      const actual = sha256(bytes);
-      if (actual !== expectedSha256) throw new Error(`checksum mismatch: ${actual}`);
-      return bytes;
-    } catch (error) {
-      lastError = error;
-    }
+export async function verifyPluginPackage(packagePath, publicKey, expected) {
+  const expectedName = `AT.Aria2_${expected.version}_${expected.target.targetOs}_${expected.target.targetArch}.atpkg`;
+  if (path.basename(packagePath) !== expectedName) {
+    throw new Error(`Package file name must be ${expectedName}`);
   }
-  throw new Error(`unable to download verified aria2 archive: ${lastError}`);
+  const extracted = await mkdtemp(path.join(tmpdir(), 'ataria2-verify-'));
+  try {
+    extract(packagePath, extracted);
+    const manifest = parseManifest(
+      JSON.parse(await readFile(path.join(extracted, 'manifest.json'), 'utf8'))
+    );
+    const signature = (await readFile(path.join(extracted, 'manifest.sig'), 'utf8')).trim();
+    if (!verifyManifestSignature(manifest, signature, publicKey)) {
+      throw new Error('Plugin manifest signature is invalid');
+    }
+    requireEqual(manifest.appId, 'com.attson.aria2', 'app ID');
+    requireEqual(manifest.version, expected.version, 'version');
+    requireEqual(manifest.publisher.keyId, expected.publisherKeyId, 'Publisher Key ID');
+    requireEqual(manifest.target.os, expected.target.targetOs, 'target OS');
+    requireEqual(manifest.target.arch, expected.target.targetArch, 'target architecture');
+    requireEqual(
+      manifest.nativeService?.entry,
+      `native/${expected.target.serviceFileName}`,
+      'native service entry'
+    );
+    for (const relative of requiredPayloadPaths(expected.target)) {
+      if (!manifest.files[relative]) throw new Error(`Plugin payload is missing ${relative}`);
+    }
+    const actualFiles = (await collect(extracted))
+      .filter((relative) => relative !== 'manifest.json' && relative !== 'manifest.sig');
+    const declaredFiles = Object.keys(manifest.files).sort();
+    if (JSON.stringify(actualFiles) !== JSON.stringify(declaredFiles)) {
+      throw new Error('Package files do not match the manifest');
+    }
+    for (const relative of declaredFiles) {
+      const actualHash = sha256(await readFile(path.join(extracted, relative)));
+      if (actualHash !== manifest.files[relative]) {
+        throw new Error(`Package hash mismatch for ${relative}`);
+      }
+    }
+    return manifest;
+  } finally {
+    await rm(extracted, { recursive: true, force: true });
+  }
 }
 
 async function collect(directory, prefix = '') {
@@ -173,7 +281,12 @@ function localTestSigningKey() {
     },
     format: 'jwk'
   });
-  return { privateKey, publicKey: createPublicKey(privateKey) };
+  return {
+    keyId: 'attool-p0-test',
+    privateKey,
+    publicKey: createPublicKey(privateKey),
+    testKey: true
+  };
 }
 
 function rustHostTarget() {
@@ -190,17 +303,41 @@ function run(program, args, cwd = process.cwd()) {
   if (result.status !== 0) throw new Error(`${program} failed`);
 }
 
+async function archive(stage, output) {
+  const entries = await collect(stage);
+  if (process.platform === 'win32') {
+    run('7z', ['a', '-tzip', '-mx=9', output, ...entries], stage);
+  } else {
+    run('zip', ['-X', '-D', '-q', output, ...entries], stage);
+  }
+}
+
+function extract(packagePath, destination) {
+  if (process.platform === 'win32') {
+    run('7z', ['x', '-y', `-o${destination}`, packagePath]);
+  } else {
+    run('unzip', ['-q', packagePath, '-d', destination]);
+  }
+}
+
+function requireEqual(actual, expected, label) {
+  if (actual !== expected) {
+    throw new Error(`Package ${label} mismatch: expected ${expected}, received ${actual}`);
+  }
+}
+
 async function main() {
-  if (!process.argv.includes('--test-key')) throw new Error('only --test-key packaging is available in P1');
   const root = path.resolve(import.meta.dirname, '..');
   const packageJson = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
   const runtimePath = process.env.ATARIA2_RUNTIME_PATH;
   if (!runtimePath) throw new Error('ATARIA2_RUNTIME_PATH is required');
-  const result = await buildTestPackage({
+  const testKey = process.argv.includes('--test-key');
+  const result = await buildPluginPackage({
     root,
     version: packageJson.version,
     targetTriple: process.env.ATARIA2_RELEASE_TARGET || rustHostTarget(),
-    runtimePath
+    runtimePath,
+    signing: testKey ? localTestSigningKey() : loadPublisherSigningConfig(process.env)
   });
   console.log(result.output);
 }
