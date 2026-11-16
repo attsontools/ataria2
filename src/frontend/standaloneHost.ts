@@ -45,6 +45,9 @@ export function createStandaloneHost(
       }
       return () => listeners.delete(listener);
     },
+    subscribeActivation() {
+      return () => undefined;
+    },
     pickDirectory: dependencies.pickDirectory,
     dispose() {
       disposed = true;

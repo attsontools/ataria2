@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { downloadVerified } from '../scripts/runtime-download.mjs';
 
 describe('pinned runtime downloads', () => {
-  it('uses the proxy only after origin failure and verifies the same hash', async () => {
+  it('uses the proxy first and falls back to the origin with the same hash check', async () => {
     const bytes = Buffer.from('verified aria2 source');
     const sha256 = createHash('sha256').update(bytes).digest('hex');
     const requests: Array<{ url: string; signal: AbortSignal }> = [];
@@ -21,8 +21,8 @@ describe('pinned runtime downloads', () => {
       { fetchImpl, timeoutMs: 5000 }
     )).resolves.toEqual(bytes);
     expect(requests.map((request) => request.url)).toEqual([
-      'https://github.com/aria2/aria2/releases/download/release-1.37.0/source.tar.gz',
-      'https://gh-proxy.com/https://github.com/aria2/aria2/releases/download/release-1.37.0/source.tar.gz'
+      'https://gh-proxy.com/https://github.com/aria2/aria2/releases/download/release-1.37.0/source.tar.gz',
+      'https://github.com/aria2/aria2/releases/download/release-1.37.0/source.tar.gz'
     ]);
     expect(requests.every((request) => request.signal instanceof AbortSignal)).toBe(true);
   });

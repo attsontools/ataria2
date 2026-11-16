@@ -13,6 +13,7 @@ import {
 
 import Panel from './components/Panel.vue';
 import TaskRow from './components/TaskRow.vue';
+import { VideoActivationInbox } from './frontend/appActivation';
 import {
   TaskEventBuffer,
   parseDownloadUrls,
@@ -45,9 +46,12 @@ const submitting = ref(false);
 const choosingDir = ref(false);
 const connecting = ref(true);
 const notice = ref('');
+const noticeType = ref<'error' | 'success'>('error');
 const taskSearch = ref('');
 let unsubscribe: (() => void) | undefined;
+let unsubscribeActivation: (() => void) | undefined;
 const taskEvents = new TaskEventBuffer();
+const activationInbox = new VideoActivationInbox();
 let refreshPromise: Promise<void> | null = null;
 let refreshAgain = false;
 
@@ -70,6 +74,7 @@ const filteredTasks = computed(() => {
 onMounted(() => void connect());
 onUnmounted(() => {
   unsubscribe?.();
+  unsubscribeActivation?.();
   props.host.dispose();
 });
 
@@ -77,12 +82,28 @@ async function connect() {
   connecting.value = true;
   notice.value = '';
   unsubscribe?.();
+  unsubscribeActivation?.();
+  unsubscribeActivation = props.host.subscribeActivation((activation) => {
+    const result = activationInbox.accept(url.value, activation);
+    if (result.kind === 'duplicate') return;
+    url.value = result.input;
+    if (result.kind === 'accepted') {
+      noticeType.value = 'success';
+      notice.value = result.added > 0
+        ? `已接收 ${result.added} 个视频下载链接。`
+        : '视频下载链接已存在，无需重复添加。';
+    } else {
+      noticeType.value = 'error';
+      notice.value = `${result.code}: ${result.message}`;
+    }
+  });
   try {
     await props.host.initialize(applyTheme);
     unsubscribe = props.host.subscribe((event) => {
       const merged = taskEvents.apply(tasks.value, event);
       tasks.value = merged.tasks;
       if (!merged.matched) void refreshTasks().catch((error) => {
+        noticeType.value = 'error';
         notice.value = formatError(error);
       });
     });
@@ -93,6 +114,7 @@ async function connect() {
     downloadDir.value = directory.path;
     tasks.value = taskEvents.hydrate(listed.tasks);
   } catch (error) {
+    noticeType.value = 'error';
     notice.value = formatError(error);
   } finally {
     connecting.value = false;
@@ -111,6 +133,7 @@ async function chooseDownloadDir() {
     const path = await props.host.pickDirectory(downloadDir.value || undefined);
     if (path) downloadDir.value = path;
   } catch (error) {
+    noticeType.value = 'error';
     notice.value = formatError(error);
   } finally {
     choosingDir.value = false;
@@ -121,6 +144,7 @@ async function startDownload() {
   const urls = parseDownloadUrls(url.value);
   const directory = downloadDir.value.trim();
   if (urls.length === 0 || !directory) {
+    noticeType.value = 'error';
     notice.value = '请填写下载链接和保存目录。';
     return;
   }
@@ -147,6 +171,7 @@ async function startDownload() {
     url.value = '';
     fileName.value = '';
   } catch (error) {
+    noticeType.value = 'error';
     notice.value = formatError(error);
   } finally {
     submitting.value = false;
@@ -198,6 +223,7 @@ async function retryTask(task: DownloadTask) {
       pendingTask(response.id, request, '任务已重新提交给 aria2')
     );
   } catch (error) {
+    noticeType.value = 'error';
     notice.value = formatError(error);
   } finally {
     submitting.value = false;
@@ -223,6 +249,7 @@ async function runAction(action: () => Promise<unknown>) {
   try {
     await action();
   } catch (error) {
+    noticeType.value = 'error';
     notice.value = formatError(error);
   }
 }
@@ -271,8 +298,8 @@ function formatError(error: unknown): string {
         </div>
       </header>
 
-      <n-alert v-if="notice" type="error" :bordered="false" class="notice">
-        <div class="notice-content"><span>{{ notice }}</span><n-button v-if="connecting || tasks.length === 0" size="tiny" secondary @click="connect">重试连接</n-button></div>
+      <n-alert v-if="notice" :type="noticeType" :bordered="false" class="notice">
+        <div class="notice-content"><span>{{ notice }}</span><n-button v-if="noticeType === 'error' && (connecting || tasks.length === 0)" size="tiny" secondary @click="connect">重试连接</n-button></div>
       </n-alert>
 
       <div class="workbench" :class="{ muted: connecting }">
