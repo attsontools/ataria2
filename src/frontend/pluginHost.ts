@@ -22,16 +22,20 @@ export function createPluginHost(connect: ConnectPlugin): DownloadHost {
   let connection: PluginConnection | null = null;
   let removeThemeListener: (() => void) | null = null;
   let removeEventListener: (() => void) | null = null;
+  let removeActivationListener: (() => void) | null = null;
   const listeners = new Set<(event: DownloadEventPayload) => void>();
+  const activationListeners = new Set<(activation: unknown) => void>();
 
   return {
     mode: 'plugin',
     async initialize(onTheme) {
       removeThemeListener?.();
       removeEventListener?.();
+      removeActivationListener?.();
       connection?.close();
       removeThemeListener = null;
       removeEventListener = null;
+      removeActivationListener = null;
       connection = null;
       connection = await connect(APP_ID);
       const handshake = await connection.handshake();
@@ -45,6 +49,9 @@ export function createPluginHost(connect: ConnectPlugin): DownloadHost {
         if (!isDownloadEvent(value)) return;
         for (const listener of listeners) listener(value);
       });
+      removeActivationListener = connection.onNotification('host.app.activated', (value) => {
+        for (const listener of activationListeners) listener(value);
+      });
       onTheme(handshake.theme);
       return handshake.theme;
     },
@@ -55,6 +62,10 @@ export function createPluginHost(connect: ConnectPlugin): DownloadHost {
     subscribe(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);
+    },
+    subscribeActivation(listener) {
+      activationListeners.add(listener);
+      return () => activationListeners.delete(listener);
     },
     async pickDirectory(defaultPath) {
       if (!connection) throw new Error('DOWNLOAD_SERVICE_NOT_CONNECTED');
@@ -72,9 +83,12 @@ export function createPluginHost(connect: ConnectPlugin): DownloadHost {
     dispose() {
       removeThemeListener?.();
       removeEventListener?.();
+      removeActivationListener?.();
       removeThemeListener = null;
       removeEventListener = null;
+      removeActivationListener = null;
       listeners.clear();
+      activationListeners.clear();
       connection?.close();
       connection = null;
     }

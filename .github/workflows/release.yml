@@ -1,0 +1,191 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+      - run: pnpm build
+      - run: pnpm build:plugin
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --workspace
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-15, target: aarch64-apple-darwin, vcpkg: arm64-osx, label: macos-arm64 }
+          - { os: macos-15-intel, target: x86_64-apple-darwin, vcpkg: x64-osx, label: macos-x64 }
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu, vcpkg: x64-linux, label: linux-x64 }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, vcpkg: arm64-linux, label: linux-arm64 }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, vcpkg: x64-windows-static, label: windows-x64 }
+    runs-on: ${{ matrix.os }}
+    environment: prod
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sync version from tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          node -e "const fs=require('fs'),p='package.json',j=JSON.parse(fs.readFileSync(p));j.version='$VERSION';fs.writeFileSync(p,JSON.stringify(j,null,2)+'\n')"
+          node -e "const fs=require('fs'),p='src-tauri/tauri.conf.json',j=JSON.parse(fs.readFileSync(p));j.version='$VERSION';fs.writeFileSync(p,JSON.stringify(j,null,2)+'\n')"
+          perl -i -pe 'BEGIN{$c=0} if(/^version = /){$c++; $_ = "version = \"'"$VERSION"'\"\n" if $c==1}' Cargo.toml
+          perl -i -pe 'BEGIN{$c=0} if(/^version = /){$c++; $_ = "version = \"'"$VERSION"'\"\n" if $c==1}' src-tauri/Cargo.toml
+
+      - name: Verify release version alignment
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: node scripts/verify-release.mjs versions "${GITHUB_REF_NAME}"
+
+      - name: Install Linux dependencies
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf build-essential
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Set up pinned vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: 67972e92edd181d433927b42d8ab4bfa52ac164a
+          runVcpkgInstall: false
+
+      - name: Restore pinned aria2 runtime
+        id: runtime-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ${{ runner.temp }}/ataria2-vcpkg
+            ${{ runner.temp }}/ataria2-runtime
+          key: aria2-runtime-v1-${{ matrix.os }}-${{ matrix.target }}-${{ hashFiles('vcpkg.json', 'runtime-manifest.json', 'scripts/build-aria2.mjs') }}
+
+      - name: Build pinned aria2 runtime
+        if: steps.runtime-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          INSTALL_ROOT="${RUNNER_TEMP}/ataria2-vcpkg"
+          "$VCPKG_ROOT/vcpkg" install --triplet "${{ matrix.vcpkg }}" --x-manifest-root=. --x-install-root="$INSTALL_ROOT"
+          PREFIX="$INSTALL_ROOT/${{ matrix.vcpkg }}"
+          if [[ "${{ matrix.target }}" == *windows* ]]; then ARIA2_NAME=aria2c.exe; else ARIA2_NAME=aria2c; fi
+          RUNTIME="${RUNNER_TEMP}/ataria2-runtime/$ARIA2_NAME"
+          ATARIA2_NATIVE_RUNTIME_PREFIX="$PREFIX" node scripts/build-aria2.mjs "${{ matrix.target }}" "$RUNTIME"
+
+      - name: Configure pinned aria2 runtime
+        shell: bash
+        run: |
+          if [[ "${{ matrix.target }}" == *windows* ]]; then ARIA2_NAME=aria2c.exe; else ARIA2_NAME=aria2c; fi
+          RUNTIME="${RUNNER_TEMP}/ataria2-runtime/$ARIA2_NAME"
+          test -f "$RUNTIME"
+          echo "ATARIA2_RUNTIME_PATH=$RUNTIME" >> "$GITHUB_ENV"
+          echo "ATARIA2_REAL_ARIA2=$RUNTIME" >> "$GITHUB_ENV"
+
+      - name: Save pinned aria2 runtime
+        if: steps.runtime-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ${{ runner.temp }}/ataria2-vcpkg
+            ${{ runner.temp }}/ataria2-runtime
+          key: ${{ steps.runtime-cache.outputs.cache-primary-key }}
+
+      - name: Smoke real aria2 through the service
+        shell: bash
+        run: cargo test --test real_aria2 pinned_aria2_downloads_a_real_file_through_the_service -- --ignored --exact
+
+      - name: Build standalone application
+        run: pnpm tauri build --target ${{ matrix.target }}
+
+      - name: Build and verify plugin package
+        env:
+          ATARIA2_RELEASE_TARGET: ${{ matrix.target }}
+          ATARIA2_PUBLISHER_KEY_ID: ${{ secrets.ATARIA2_PUBLISHER_KEY_ID }}
+          ATARIA2_PUBLISHER_PRIVATE_KEY: ${{ secrets.ATARIA2_PUBLISHER_PRIVATE_KEY }}
+          ATARIA2_PUBLISHER_PUBLIC_KEY: ${{ secrets.ATARIA2_PUBLISHER_PUBLIC_KEY }}
+        run: pnpm package:plugin
+
+      - name: Stage release assets
+        shell: bash
+        run: |
+          mkdir -p "${RUNNER_TEMP}/stage"
+          VERSION=$(node -p "require('./package.json').version")
+          case "${{ matrix.target }}" in
+            aarch64-apple-darwin) OS=macos; ARCH=aarch64; EXT=dmg ;;
+            x86_64-apple-darwin) OS=macos; ARCH=x86_64; EXT=dmg ;;
+            aarch64-unknown-linux-gnu) OS=linux; ARCH=aarch64; EXT=deb ;;
+            x86_64-unknown-linux-gnu) OS=linux; ARCH=x86_64; EXT=deb ;;
+            x86_64-pc-windows-msvc) OS=windows; ARCH=x86_64; EXT=exe ;;
+            *) echo "Unsupported release target: ${{ matrix.target }}" >&2; exit 1 ;;
+          esac
+          PLUGIN="artifacts/AT.Aria2_${VERSION}_${OS}_${ARCH}.atpkg"
+          test -f "$PLUGIN"
+          INSTALLER_COUNT=$(find "src-tauri/target/${{ matrix.target }}/release/bundle" -type f -name "*.${EXT}" | wc -l | tr -d ' ')
+          test "$INSTALLER_COUNT" -eq 1
+          INSTALLER=$(find "src-tauri/target/${{ matrix.target }}/release/bundle" -type f -name "*.${EXT}" | head -1)
+          cp "$PLUGIN" "${RUNNER_TEMP}/stage/"
+          cp "$INSTALLER" "${RUNNER_TEMP}/stage/AT.Aria2_${VERSION}_${OS}_${ARCH}.${EXT}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aria2-${{ matrix.label }}
+          path: ${{ runner.temp }}/stage/*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    environment: prod
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: aria2-*
+          path: release-assets
+          merge-multiple: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Stage pinned aria2 source
+        run: node scripts/fetch-aria2-source.mjs release-assets
+
+      - name: Verify release asset set
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          ARIA2_VERSION=$(node -p "require('./runtime-manifest.json').aria2.version")
+          node scripts/verify-release.mjs assets release-assets "$VERSION" "$ARIA2_VERSION"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" release-assets/* --repo "${GITHUB_REPOSITORY}" --verify-tag --generate-notes

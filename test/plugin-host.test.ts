@@ -7,7 +7,7 @@ describe('plugin download host', () => {
     const call = vi.fn(async <T,>(method: string): Promise<T> => (method === 'host.handshake'
       ? undefined
       : { id: 'dl-1' }) as T);
-    let eventListener: ((value: unknown) => void) | undefined;
+    const notifications = new Map<string, (value: unknown) => void>();
     const host = createPluginHost(async () => ({
       handshake: async () => ({
         apiVersion: '2.0',
@@ -19,8 +19,8 @@ describe('plugin download host', () => {
       }),
       call,
       onThemeChange: () => () => undefined,
-      onNotification: (_method, listener) => {
-        eventListener = listener;
+      onNotification: (method, listener) => {
+        notifications.set(method, listener);
         return () => undefined;
       },
       close: vi.fn()
@@ -32,7 +32,7 @@ describe('plugin download host', () => {
     const result = await host.request<{ id: string }>('download.tasks.start', {
       request: { url: 'https://example.com/a.zip', downloadDir: '/tmp' }
     });
-    eventListener?.({ id: 'dl-1', status: 'running', progress: 25 });
+    notifications.get('host.download.taskEvent')?.({ id: 'dl-1', status: 'running', progress: 25 });
 
     expect(result).toEqual({ id: 'dl-1' });
     expect(call).toHaveBeenCalledWith('host.download.tasks', {
@@ -62,8 +62,37 @@ describe('plugin download host', () => {
     await host.initialize(() => undefined);
 
     expect(removeThemes[0]).toHaveBeenCalledOnce();
-    expect(removeEvents[0]).toHaveBeenCalledOnce();
+    expect(removeEvents[0]).toHaveBeenCalledTimes(2);
     expect(closes[0]).toHaveBeenCalledOnce();
     expect(closes[1]).not.toHaveBeenCalled();
+  });
+
+  it('delivers Host app activation notifications to subscribers', async () => {
+    const notifications = new Map<string, (value: unknown) => void>();
+    const host = createPluginHost(async () => ({
+      handshake: async () => ({ theme: 'dark' as const, capabilities: ['host.download.tasks'] }),
+      call: async () => ({}),
+      onThemeChange: () => () => undefined,
+      onNotification: (method, listener) => {
+        notifications.set(method, listener);
+        return () => notifications.delete(method);
+      },
+      close: vi.fn()
+    }));
+    const received: unknown[] = [];
+    host.subscribeActivation((activation) => received.push(activation));
+
+    await host.initialize(() => undefined);
+    notifications.get('host.app.activated')?.({
+      activationId: 'activation-1',
+      sourceAppId: 'com.attson.video',
+      payload: { version: 1, kind: 'download.urls', urls: ['https://example.com/video.mp4'] }
+    });
+
+    expect(received).toEqual([{
+      activationId: 'activation-1',
+      sourceAppId: 'com.attson.video',
+      payload: { version: 1, kind: 'download.urls', urls: ['https://example.com/video.mp4'] }
+    }]);
   });
 });

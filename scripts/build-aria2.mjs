@@ -1,8 +1,9 @@
 import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
+
+import { downloadVerified } from './runtime-download.mjs';
 
 const [target, outputValue] = process.argv.slice(2);
 if (!target || !outputValue) throw new Error('usage: build-aria2.mjs <target-triple> <output-path>');
@@ -53,6 +54,10 @@ try {
     run('make', ['-j2'], source, environment);
     copyFileSync(resolve(source, 'src/aria2c'), output);
     copyFileSync(resolve(source, 'COPYING'), resolve(dirname(output), 'aria2-COPYING'));
+    copyFileSync(
+      resolve(source, 'LICENSE.OpenSSL'),
+      resolve(dirname(output), 'aria2-LICENSE.OpenSSL')
+    );
     chmodSync(output, 0o755);
   }
   const version = spawnSync(output, ['--version'], { encoding: 'utf8' });
@@ -61,23 +66,6 @@ try {
   }
 } finally {
   rmSync(temporary, { recursive: true, force: true });
-}
-
-export async function downloadVerified(origin, expectedSha256) {
-  let lastError;
-  for (const url of [origin, `https://gh-proxy.com/${origin}`]) {
-    try {
-      const response = await fetch(url);
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const bytes = Buffer.from(await response.arrayBuffer());
-      const actual = createHash('sha256').update(bytes).digest('hex');
-      if (actual !== expectedSha256) throw new Error(`checksum mismatch: ${actual}`);
-      return bytes;
-    } catch (error) {
-      lastError = error;
-    }
-  }
-  throw new Error(`unable to download verified aria2 archive: ${lastError}`);
 }
 
 function run(program, args, cwd = process.cwd(), env = process.env) {

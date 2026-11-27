@@ -34,6 +34,7 @@ export interface DownloadHost {
   initialize(onTheme: (theme: ThemeName) => void): Promise<ThemeName>;
   request<T>(method: string, params?: unknown): Promise<T>;
   subscribe(listener: (event: DownloadEventPayload) => void): () => void;
+  subscribeActivation(listener: (activation: unknown) => void): () => void;
   pickDirectory(defaultPath?: string): Promise<string | null>;
   dispose(): void;
 }

@@ -1,8 +1,19 @@
 import { execFileSync } from 'node:child_process';
-import { chmodSync, copyFileSync, mkdirSync } from 'node:fs';
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync
+} from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
+
+import { downloadVerified } from './runtime-download.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const release = process.argv.includes('--release');
@@ -39,6 +50,43 @@ const runtimeDestination = resolve(
 );
 copyFileSync(runtimeSource, runtimeDestination);
 if (!extension) chmodSync(runtimeDestination, 0o755);
+await stageLicenses(runtimeSource);
+
+async function stageLicenses(runtimePath) {
+  const licenses = resolve(root, 'src-tauri', 'binaries', 'licenses');
+  mkdirSync(licenses, { recursive: true });
+  const runtimeDirectory = dirname(runtimePath);
+  const copying = resolve(runtimeDirectory, 'aria2-COPYING');
+  const openSslNotice = resolve(runtimeDirectory, 'aria2-LICENSE.OpenSSL');
+  if (existsSync(copying) && existsSync(openSslNotice)) {
+    copyFileSync(copying, resolve(licenses, 'aria2-COPYING'));
+    copyFileSync(openSslNotice, resolve(licenses, 'aria2-LICENSE.OpenSSL'));
+  } else {
+    const manifest = JSON.parse(readFileSync(resolve(root, 'runtime-manifest.json'), 'utf8')).aria2;
+    const name = `aria2-${manifest.version}.tar.gz`;
+    const origin = `https://github.com/aria2/aria2/releases/download/release-${manifest.version}/${name}`;
+    const temporary = mkdtempSync(resolve(tmpdir(), 'ataria2-license-'));
+    try {
+      const archive = resolve(temporary, name);
+      writeFileSync(archive, await downloadVerified(origin, manifest.sourceSha256));
+      execFileSync('tar', [
+        '-xzf', archive, '-C', temporary,
+        `aria2-${manifest.version}/COPYING`,
+        `aria2-${manifest.version}/LICENSE.OpenSSL`
+      ]);
+      copyFileSync(
+        resolve(temporary, `aria2-${manifest.version}`, 'COPYING'),
+        resolve(licenses, 'aria2-COPYING')
+      );
+      copyFileSync(
+        resolve(temporary, `aria2-${manifest.version}`, 'LICENSE.OpenSSL'),
+        resolve(licenses, 'aria2-LICENSE.OpenSSL')
+      );
+    } finally {
+      rmSync(temporary, { recursive: true, force: true });
+    }
+  }
+}
 
 function rustHostTarget() {
   const output = execFileSync('rustc', ['-vV'], { encoding: 'utf8' });
