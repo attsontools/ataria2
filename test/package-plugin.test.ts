@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   assertAria2Version,
+  assertPluginManifestContract,
   createPluginManifest,
   loadPublisherSigningConfig,
   requiredPayloadPaths,
@@ -18,7 +19,8 @@ describe('Aria2 plugin package contract', () => {
       'ui/index.html': 'a'.repeat(64),
       'native/ataria2-service': 'b'.repeat(64),
       'native/aria2c': 'c'.repeat(64),
-      'licenses/aria2-COPYING': 'd'.repeat(64)
+      'licenses/aria2-COPYING': 'd'.repeat(64),
+      'licenses/aria2-LICENSE.OpenSSL': 'f'.repeat(64)
     };
 
     const manifest = createPluginManifest({
@@ -74,11 +76,35 @@ describe('Aria2 plugin package contract', () => {
     expect(requiredPayloadPaths(resolveReleaseTarget('x86_64-unknown-linux-gnu'))).toEqual([
       'LICENSE',
       'licenses/aria2-COPYING',
+      'licenses/aria2-LICENSE.OpenSSL',
       'native/aria2c',
       'native/ataria2-service',
       'ui/index.html'
     ]);
     expect(requiredPayloadPaths(resolveReleaseTarget('x86_64-pc-windows-msvc')))
       .toContain('licenses/aria2-LICENSE.OpenSSL');
+  });
+
+  it('verifies the complete signed manifest contract before publishing', () => {
+    const target = resolveReleaseTarget('x86_64-unknown-linux-gnu');
+    const files = Object.fromEntries(
+      requiredPayloadPaths(target).map((path, index) => [path, String(index).padStart(64, 'a')])
+    );
+    const expected = {
+      version: '0.1.0-alpha.0',
+      publisherKeyId: 'attson-aria2-2026-01',
+      target
+    };
+    const manifest = createPluginManifest({ ...expected, files });
+
+    expect(() => assertPluginManifestContract(manifest, expected)).not.toThrow();
+    expect(() => assertPluginManifestContract({
+      ...manifest,
+      permissions: ['host.theme.read', 'host.download.tasks', 'host.http.request']
+    }, expected)).toThrow(/permissions/);
+    expect(() => assertPluginManifestContract({
+      ...manifest,
+      nativeService: { ...manifest.nativeService, protocolVersion: 2 }
+    }, expected)).toThrow(/protocol version/);
   });
 });

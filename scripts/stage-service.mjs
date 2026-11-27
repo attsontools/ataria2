@@ -50,15 +50,17 @@ const runtimeDestination = resolve(
 );
 copyFileSync(runtimeSource, runtimeDestination);
 if (!extension) chmodSync(runtimeDestination, 0o755);
-await stageLicenses(runtimeSource, target.includes('windows'));
+await stageLicenses(runtimeSource);
 
-async function stageLicenses(runtimePath, windows) {
+async function stageLicenses(runtimePath) {
   const licenses = resolve(root, 'src-tauri', 'binaries', 'licenses');
   mkdirSync(licenses, { recursive: true });
   const runtimeDirectory = dirname(runtimePath);
   const copying = resolve(runtimeDirectory, 'aria2-COPYING');
-  if (existsSync(copying)) {
+  const openSslNotice = resolve(runtimeDirectory, 'aria2-LICENSE.OpenSSL');
+  if (existsSync(copying) && existsSync(openSslNotice)) {
     copyFileSync(copying, resolve(licenses, 'aria2-COPYING'));
+    copyFileSync(openSslNotice, resolve(licenses, 'aria2-LICENSE.OpenSSL'));
   } else {
     const manifest = JSON.parse(readFileSync(resolve(root, 'runtime-manifest.json'), 'utf8')).aria2;
     const name = `aria2-${manifest.version}.tar.gz`;
@@ -67,22 +69,22 @@ async function stageLicenses(runtimePath, windows) {
     try {
       const archive = resolve(temporary, name);
       writeFileSync(archive, await downloadVerified(origin, manifest.sourceSha256));
-      execFileSync('tar', ['-xzf', archive, '-C', temporary, `aria2-${manifest.version}/COPYING`]);
+      execFileSync('tar', [
+        '-xzf', archive, '-C', temporary,
+        `aria2-${manifest.version}/COPYING`,
+        `aria2-${manifest.version}/LICENSE.OpenSSL`
+      ]);
       copyFileSync(
         resolve(temporary, `aria2-${manifest.version}`, 'COPYING'),
         resolve(licenses, 'aria2-COPYING')
       );
+      copyFileSync(
+        resolve(temporary, `aria2-${manifest.version}`, 'LICENSE.OpenSSL'),
+        resolve(licenses, 'aria2-LICENSE.OpenSSL')
+      );
     } finally {
       rmSync(temporary, { recursive: true, force: true });
     }
-  }
-  if (windows) {
-    copyFileSync(
-      resolve(runtimeDirectory, 'aria2-LICENSE.OpenSSL'),
-      resolve(licenses, 'aria2-LICENSE.OpenSSL')
-    );
-  } else {
-    rmSync(resolve(licenses, 'aria2-LICENSE.OpenSSL'), { force: true });
   }
 }
 

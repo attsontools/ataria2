@@ -7,7 +7,7 @@ export async function downloadVerified(
   expectedSha256,
   { fetchImpl = fetch, timeoutMs = DEFAULT_TIMEOUT_MS } = {}
 ) {
-  const candidates = [...proxyCandidates(origin), origin];
+  const candidates = [origin, ...proxyCandidates(origin)];
   let lastError;
   for (const url of candidates) {
     try {

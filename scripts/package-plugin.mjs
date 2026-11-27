@@ -34,7 +34,7 @@ export function requiredPayloadPaths(target) {
   return [
     'LICENSE',
     'licenses/aria2-COPYING',
-    ...(target.targetOs === 'windows' ? ['licenses/aria2-LICENSE.OpenSSL'] : []),
+    'licenses/aria2-LICENSE.OpenSSL',
     `native/${target.runtimeFileName}`,
     `native/${target.serviceFileName}`,
     'ui/index.html'
@@ -64,6 +64,30 @@ export function createPluginManifest({ version, target, publisherKeyId, files })
     },
     files
   });
+}
+
+export function assertPluginManifestContract(manifest, expected) {
+  const serviceEntry = `native/${expected.target.serviceFileName}`;
+  requireEqual(manifest.appId, 'com.attson.aria2', 'app ID');
+  requireEqual(manifest.version, expected.version, 'version');
+  requireEqual(manifest.publisher.id, 'com.attson', 'Publisher ID');
+  requireEqual(manifest.publisher.keyId, expected.publisherKeyId, 'Publisher Key ID');
+  requireEqual(manifest.target.os, expected.target.targetOs, 'target OS');
+  requireEqual(manifest.target.arch, expected.target.targetArch, 'target architecture');
+  requireEqual(manifest.hostApi.min, '2.0.0', 'minimum Host API');
+  requireEqual(manifest.hostApi.max, '2.x', 'maximum Host API');
+  requireEqual(
+    JSON.stringify(manifest.permissions),
+    JSON.stringify(['host.theme.read', 'host.download.tasks']),
+    'permissions'
+  );
+  requireEqual(manifest.nativeService?.entry, serviceEntry, 'native service entry');
+  requireEqual(manifest.nativeService?.version, expected.version, 'native service version');
+  requireEqual(manifest.nativeService?.protocolVersion, 1, 'native service protocol version');
+  requireEqual(manifest.nativeService?.sha256, manifest.files[serviceEntry], 'native service hash');
+  for (const relative of requiredPayloadPaths(expected.target)) {
+    if (!manifest.files[relative]) throw new Error(`Plugin payload is missing ${relative}`);
+  }
 }
 
 export function loadPublisherSigningConfig(env) {
@@ -183,12 +207,10 @@ async function stageAria2Licenses(root, stage, target, runtimePath, testKey) {
       path.join(runtimeDirectory, 'aria2-COPYING'),
       path.join(stage, 'licenses', 'aria2-COPYING')
     );
-    if (target.targetOs === 'windows') {
-      await cp(
-        path.join(runtimeDirectory, 'aria2-LICENSE.OpenSSL'),
-        path.join(stage, 'licenses', 'aria2-LICENSE.OpenSSL')
-      );
-    }
+    await cp(
+      path.join(runtimeDirectory, 'aria2-LICENSE.OpenSSL'),
+      path.join(stage, 'licenses', 'aria2-LICENSE.OpenSSL')
+    );
     return;
   }
   const runtime = JSON.parse(await readFile(path.join(root, 'runtime-manifest.json'), 'utf8')).aria2;
@@ -199,10 +221,18 @@ async function stageAria2Licenses(root, stage, target, runtimePath, testKey) {
   try {
     const archivePath = path.join(temporary, name);
     await writeFile(archivePath, archive);
-    run('tar', ['-xzf', archivePath, '-C', temporary, `aria2-${runtime.version}/COPYING`]);
+    run('tar', [
+      '-xzf', archivePath, '-C', temporary,
+      `aria2-${runtime.version}/COPYING`,
+      `aria2-${runtime.version}/LICENSE.OpenSSL`
+    ]);
     await cp(
       path.join(temporary, `aria2-${runtime.version}`, 'COPYING'),
       path.join(stage, 'licenses', 'aria2-COPYING')
+    );
+    await cp(
+      path.join(temporary, `aria2-${runtime.version}`, 'LICENSE.OpenSSL'),
+      path.join(stage, 'licenses', 'aria2-LICENSE.OpenSSL')
     );
   } finally {
     await rm(temporary, { recursive: true, force: true });
@@ -224,19 +254,7 @@ export async function verifyPluginPackage(packagePath, publicKey, expected) {
     if (!verifyManifestSignature(manifest, signature, publicKey)) {
       throw new Error('Plugin manifest signature is invalid');
     }
-    requireEqual(manifest.appId, 'com.attson.aria2', 'app ID');
-    requireEqual(manifest.version, expected.version, 'version');
-    requireEqual(manifest.publisher.keyId, expected.publisherKeyId, 'Publisher Key ID');
-    requireEqual(manifest.target.os, expected.target.targetOs, 'target OS');
-    requireEqual(manifest.target.arch, expected.target.targetArch, 'target architecture');
-    requireEqual(
-      manifest.nativeService?.entry,
-      `native/${expected.target.serviceFileName}`,
-      'native service entry'
-    );
-    for (const relative of requiredPayloadPaths(expected.target)) {
-      if (!manifest.files[relative]) throw new Error(`Plugin payload is missing ${relative}`);
-    }
+    assertPluginManifestContract(manifest, expected);
     const actualFiles = (await collect(extracted))
       .filter((relative) => relative !== 'manifest.json' && relative !== 'manifest.sig');
     const declaredFiles = Object.keys(manifest.files).sort();

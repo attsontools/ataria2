@@ -54,6 +54,10 @@ try {
     run('make', ['-j2'], source, environment);
     copyFileSync(resolve(source, 'src/aria2c'), output);
     copyFileSync(resolve(source, 'COPYING'), resolve(dirname(output), 'aria2-COPYING'));
+    copyFileSync(
+      resolve(source, 'LICENSE.OpenSSL'),
+      resolve(dirname(output), 'aria2-LICENSE.OpenSSL')
+    );
     chmodSync(output, 0o755);
   }
   const version = spawnSync(output, ['--version'], { encoding: 'utf8' });
