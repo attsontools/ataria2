@@ -50,6 +50,9 @@ describe('Aria2 release contract', () => {
     expect(workflow).toContain('Build pinned aria2 runtime');
     expect(workflow).toContain('ATARIA2_REAL_ARIA2=$RUNTIME');
     expect(workflow).toContain("if: startsWith(github.ref, 'refs/tags/v')");
+    expect(workflow).toMatch(
+      /- name: Verify release version alignment\n\s+if: startsWith\(github\.ref, 'refs\/tags\/v'\)\n\s+shell: bash\n\s+run: node scripts\/verify-release\.mjs versions "\$\{GITHUB_REF_NAME\}"/
+    );
     expect(workflow).toContain('scripts/verify-release.mjs assets');
   });
 
