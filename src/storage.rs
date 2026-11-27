@@ -537,7 +537,7 @@ fn takeover_bytes(state: &str, source: &Path, nonce: &str) -> Result<Vec<u8>, Se
 
 fn sync_file(path: &Path) -> Result<(), ServiceError> {
     OpenOptions::new()
-        .read(true)
+        .write(true)
         .open(path)
         .and_then(|file| file.sync_all())
         .map_err(migration_io_error)
